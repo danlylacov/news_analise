@@ -7,8 +7,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-from nn_model import NewsTickerModel
-from nn_data import load_vocab, encode_text
+from src.ml.nn_model import NewsTickerModel
+from src.ml.nn_data import load_vocab, encode_text
 
 
 def load_artifacts(artifacts: str):

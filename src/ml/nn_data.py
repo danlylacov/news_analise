@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from news_nlp import normalize_text
+from src.core.news_nlp import normalize_text
 
 
 def build_vocab(texts: List[str], min_freq: int = 3, max_size: int = 50000) -> Dict[str, int]:

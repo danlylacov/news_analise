@@ -3,8 +3,8 @@ from pydantic import BaseModel, Field
 from typing import Optional, Literal, List, Dict, Any
 import pandas as pd
 
-from auto_label_tickers import build_aliases, assign_tickers_row
-from infer_news_to_candles import infer_news_to_candles_df
+from src.core.auto_label_tickers import build_aliases, assign_tickers_row
+from src.core.infer_news_to_candles import infer_news_to_candles_df
 
 app = FastAPI(title="FORECAST API: JSON news + candles → features + join")
 

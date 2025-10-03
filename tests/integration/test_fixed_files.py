@@ -9,8 +9,8 @@ def test_fixed_json_files():
     """Тестируем исправленные JSON файлы"""
     
     files_to_test = [
-        ("synchronized_swagger_data.json", "Синхронизированные данные"),
-        ("full_swagger_data_fixed.json", "Исправленные параметры")
+        ("examples/json_samples/synchronized_swagger_data.json", "Синхронизированные данные"),
+        ("examples/json_samples/full_swagger_data_fixed.json", "Исправленные параметры")
     ]
     
     url = "http://176.57.217.27:8000/infer"

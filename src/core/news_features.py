@@ -5,7 +5,7 @@ from typing import List
 
 import pandas as pd
 
-from news_nlp import (
+from src.core.news_nlp import (
     SentimentLexicon,
     tokenize_lemmas,
     sentiment_score,

@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple
 
 import pandas as pd
 from rapidfuzz import fuzz
-from news_nlp import normalize_text
+from src.core.news_nlp import normalize_text
 
 
 DEFAULT_ALIASES = {

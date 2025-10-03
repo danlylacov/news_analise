@@ -10,8 +10,8 @@ import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
 
-from nn_model import NewsTickerModel
-from nn_data import NewsDataset, build_vocab, save_vocab, load_vocab, collate_batch
+from src.ml.nn_model import NewsTickerModel
+from src.ml.nn_data import NewsDataset, build_vocab, save_vocab, load_vocab, collate_batch
 
 
 def compute_pos_weight(train_df: pd.DataFrame, ticker_to_idx: Dict[str, int]) -> torch.Tensor:
