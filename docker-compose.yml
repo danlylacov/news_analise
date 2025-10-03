@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  forecast-api:
+    build: .
+    container_name: forecast-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ARTIFACTS_DIR=/data/artifacts
+    volumes:
+      - ./artifacts:/data/artifacts:ro
+      - ./data:/data:rw
+    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -50,8 +50,16 @@ def score_news(df_news: pd.DataFrame, vocab, model_state, num_labels: int, max_l
     return np.vstack(scores) if scores else np.zeros((0, num_labels))
 
 
-def aggregate_to_candles(df_candles: pd.DataFrame, df_news: pd.DataFrame, scores: np.ndarray, ticker_to_idx: dict, half_life_days: float = 2.0) -> pd.DataFrame:
-    idx_to_ticker = {v: k for k, v in ticker_to_idx.items()}
+def aggregate_to_candles(
+    df_candles: pd.DataFrame,
+    df_news: pd.DataFrame,
+    scores: np.ndarray,
+    ticker_to_idx: dict,
+    half_life_days: float = 2.0,
+    p_threshold: float = 0.5,
+    max_days: float = 20.0,
+) -> pd.DataFrame:
+    scores = np.asarray(scores)
     df_news = df_news.copy()
     df_news['publish_date'] = pd.to_datetime(df_news['publish_date'], errors='coerce')
     df_news['date'] = df_news['publish_date'].dt.date
@@ -60,28 +68,43 @@ def aggregate_to_candles(df_candles: pd.DataFrame, df_news: pd.DataFrame, scores
     df_candles['begin'] = pd.to_datetime(df_candles['begin'], errors='coerce')
     df_candles['date'] = df_candles['begin'].dt.date
 
-    decay_lambda = math.log(2) / max(half_life_days, 1e-3)
+    news_dates = pd.to_datetime(df_news['date']).values.astype('datetime64[D]')
+
+    decay_lambda = math.log(2) / max(half_life_days, 1e-6)
+    max_days = float(max_days) if max_days is not None else np.inf
 
     features = []
-    news_dates = pd.to_datetime(df_news['date']).values
-
     for ticker, g in df_candles.groupby('ticker'):
         if ticker not in ticker_to_idx:
             continue
         label_idx = ticker_to_idx[ticker]
-        probs = scores[:, label_idx]
+        probs = np.asarray(scores[:, label_idx], dtype=np.float64)
         for dt, sub in g.groupby('date'):
-            mask = news_dates <= np.datetime64(dt)
-            if not mask.any():
-                features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': 0.0, 'nn_news_mean': 0.0, 'nn_news_count': 0})
+            dt64 = np.datetime64(dt)
+            # окно: новости за последние max_days и не позже даты свечи
+            if np.isfinite(max_days):
+                min_dt64 = dt64 - np.timedelta64(int(max_days), 'D')
+                base_mask = (news_dates <= dt64) & (news_dates >= min_dt64)
             else:
-                deltas = (pd.to_datetime(dt) - pd.to_datetime(news_dates[mask])).days.astype('int64')
-                weights = np.exp(-decay_lambda * deltas)
-                wprobs = probs[mask] * weights
-                cnt = int(mask.sum())
-                ssum = float(wprobs.sum())
-                smean = float(wprobs.mean()) if cnt > 0 else 0.0
-                features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': ssum, 'nn_news_mean': smean, 'nn_news_count': cnt})
+                base_mask = (news_dates <= dt64)
+            if not base_mask.any():
+                features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': 0.0, 'nn_news_mean': 0.0, 'nn_news_max': 0.0, 'nn_news_count': 0})
+                continue
+            # релевантность по порогу
+            mask_thr = base_mask & (probs >= p_threshold)
+            if not mask_thr.any():
+                features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': 0.0, 'nn_news_mean': 0.0, 'nn_news_max': 0.0, 'nn_news_count': 0})
+                continue
+            # затухание
+            deltas = (dt64 - news_dates[mask_thr]).astype('timedelta64[D]').astype(int)
+            weights = np.exp(-decay_lambda * deltas.astype(np.float64))
+            vals = probs[mask_thr]
+            wvals = vals * weights
+            cnt = int(mask_thr.sum())
+            ssum = float(np.sum(wvals))
+            smean = float(np.mean(wvals)) if cnt > 0 else 0.0
+            smax = float(np.max(wvals)) if cnt > 0 else 0.0
+            features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': ssum, 'nn_news_mean': smean, 'nn_news_max': smax, 'nn_news_count': cnt})
     return pd.DataFrame(features)
 
 
@@ -91,6 +114,9 @@ def main():
     parser.add_argument('--candles', required=True, help='task_1_candles.csv')
     parser.add_argument('--artifacts', default='artifacts')
     parser.add_argument('--out', required=True)
+    parser.add_argument('--half_life_days', type=float, default=2.0)
+    parser.add_argument('--p_threshold', type=float, default=0.5)
+    parser.add_argument('--max_days', type=float, default=20.0)
     args = parser.parse_args()
 
     ticker_to_idx, vocab, ckpt = load_artifacts(args.artifacts)
@@ -99,7 +125,12 @@ def main():
     df_candles = pd.read_csv(args.candles)
 
     scores = score_news(df_news, vocab, ckpt['state_dict'], num_labels=len(ticker_to_idx), max_len=ckpt['config'].get('max_len', 256))
-    feats = aggregate_to_candles(df_candles, df_news, scores, ticker_to_idx)
+    feats = aggregate_to_candles(
+        df_candles, df_news, scores, ticker_to_idx,
+        half_life_days=args.half_life_days,
+        p_threshold=args.p_threshold,
+        max_days=args.max_days,
+    )
 
     if args.out.endswith('.parquet'):
         feats.to_parquet(args.out, index=False)
