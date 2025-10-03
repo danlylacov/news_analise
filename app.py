@@ -1,101 +1,143 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, Body
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
-import os
-import io
+from typing import Optional, Literal, List, Dict, Any
 import pandas as pd
 
 from auto_label_tickers import build_aliases, assign_tickers_row
-from infer_news_to_candles import load_artifacts, score_news, aggregate_to_candles
+from infer_news_to_candles import infer_news_to_candles_df
 
-app = FastAPI(title="FORECAST API: raw news + candles → features + join")
-
-
-class InferParams(BaseModel):
-    artifacts_dir: str = Field('artifacts')
-    p_threshold: float = 0.5
-    half_life_days: float = 0.5
-    max_days: float = 5.0
-    out_path: Optional[str] = None
-    join_out_path: Optional[str] = None
-    response_format: Literal['json','none'] = 'json'
+app = FastAPI(title="FORECAST API: JSON news + candles → features + join")
 
 
-def auto_label(df_news: pd.DataFrame) -> pd.DataFrame:
+class NewsItem(BaseModel):
+    publish_date: str
+    title: str
+    publication: str
+
+
+class CandleItem(BaseModel):
+    begin: str
+    ticker: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class InferRequest(BaseModel):
+    news: List[NewsItem] = Field(..., description='Список новостей')
+    candles: List[CandleItem] = Field(..., description='Список свечей')
+    artifacts_dir: str = Field('artifacts', description='Путь к артефактам модели')
+    p_threshold: float = Field(0.5, description='Порог релевантности новостей')
+    half_life_days: float = Field(0.5, description='Период полураспада влияния новостей')
+    max_days: float = Field(5.0, description='Максимальный возраст учитываемых новостей')
+
+
+class InferResponse(BaseModel):
+    status: str
+    rows_features: int
+    rows_joined: int
+    features_preview: Optional[List[Dict[str, Any]]] = None
+    joined_preview: Optional[List[Dict[str, Any]]] = None
+    message: Optional[str] = None
+
+
+def auto_label_news(news_dicts: List[Dict]) -> List[Dict]:
+    """Автоматическая разметка тикеров для новостей"""
+    # Конвертируем в DataFrame для обработки
+    df_news = pd.DataFrame(news_dicts)
+    
+    # Строим словарь алиасов
     aliases = build_aliases(None)
+    
     tickers = []
-    for _, r in df_news.iterrows():
-        tks = assign_tickers_row(r.get('title'), r.get('publication'), aliases)
+    for _, row in df_news.iterrows():
+        tks = assign_tickers_row(row.get('title'), row.get('publication'), aliases)
         tickers.append(';'.join(tks))
-    df_news = df_news.copy()
+    
     df_news['tickers'] = tickers
-    return df_news
+    
+    return df_news.to_dict(orient='records')
 
 
-@app.post('/infer')
-async def infer(
-    news_file: UploadFile = File(..., description='CSV с publish_date,title,publication'),
-    candles_file: UploadFile = File(..., description='CSV со свечами (begin,ticker,OHLCV)'),
-    artifacts_dir: str = Form('artifacts'),
-    p_threshold: float = Form(0.5),
-    half_life_days: float = Form(0.5),
-    max_days: float = Form(5.0),
-    out_path: Optional[str] = Form(None),
-    join_out_path: Optional[str] = Form(None),
-    response_format: str = Form('json'),
-):
-    # читаем входные CSV из multipart
-    news_bytes = await news_file.read()
-    candles_bytes = await candles_file.read()
-    df_news = pd.read_csv(io.BytesIO(news_bytes))
-    df_candles = pd.read_csv(io.BytesIO(candles_bytes))
+@app.post('/infer', response_model=InferResponse)
+async def infer(request: InferRequest):
+    """
+    Основной эндпоинт для инференса новостей
+    
+    Принимает:
+    - news: список новостей (без тикеров)
+    - candles: список свечей (OHLCV данные)
+    - параметры модели и агрегации
+    
+    Возвращает:
+    - features: агрегированные новостные фичи по тикерам и датам
+    - joined: свечи с добавленными новостными фичами
+    """
+    try:
+        # Конвертируем Pydantic модели в словари
+        news_dicts = [item.dict() for item in request.news]
+        candles_dicts = [item.dict() for item in request.candles]
+        
+        # Автоматическая разметка тикеров для новостей
+        labeled_news = auto_label_news(news_dicts)
+        
+        # Конвертируем в DataFrame
+        df_news = pd.DataFrame(labeled_news)
+        df_candles = pd.DataFrame(candles_dicts)
+        
+        # Инференс новостей к свечам
+        features_df, joined_df = infer_news_to_candles_df(
+            df_news, df_candles, 
+            artifacts_dir=request.artifacts_dir,
+            p_threshold=request.p_threshold,
+            half_life_days=request.half_life_days,
+            max_days=request.max_days
+        )
+        
+        return InferResponse(
+            status="success",
+            rows_features=len(features_df),
+            rows_joined=len(joined_df),
+            features_preview=features_df.head(50).to_dict(orient='records'),
+            joined_preview=joined_df.head(50).to_dict(orient='records')
+        )
+        
+    except Exception as e:
+        return InferResponse(
+            status="error",
+            rows_features=0,
+            rows_joined=0,
+            message=f"Ошибка при обработке: {str(e)}"
+        )
 
-    # авторазметка тикеров
-    df_news = auto_label(df_news)
 
-    # артефакты/модель
-    ticker_to_idx, vocab, ckpt = load_artifacts(artifacts_dir)
+@app.get('/')
+async def root():
+    return {"message": "FORECAST API готов к работе", "version": "1.0"}
 
-    # инференс
-    scores = score_news(df_news, vocab, ckpt['state_dict'], num_labels=len(ticker_to_idx), max_len=ckpt['config'].get('max_len', 256))
-    feats = aggregate_to_candles(
-        df_candles, df_news, scores, ticker_to_idx,
-        half_life_days=half_life_days,
-        p_threshold=p_threshold,
-        max_days=max_days,
-    )
 
-    # сохранить при необходимости
-    if out_path:
-        if out_path.endswith('.parquet'):
-            feats.to_parquet(out_path, index=False)
+@app.post('/health')
+async def health_check():
+    """Проверка доступности артефактов модели"""
+    try:
+        import os
+        artifacts_dir = "artifacts"
+        required_files = ['model.pt', 'vocab.json', 'tickers.json', 'lexicon.json']
+        
+        missing_files = []
+        for file in required_files:
+            if not os.path.exists(os.path.join(artifacts_dir, file)):
+                missing_files.append(file)
+        
+        if missing_files:
+            return {"status": "unhealthy", "missing_files": missing_files}
         else:
-            feats.to_csv(out_path, index=False)
+            return {"status": "healthy", "message": "Все артефакты найдены"}
+            
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
-    # джойн со свечами
-    candles = df_candles.copy()
-    if 'begin' in candles.columns:
-        candles['begin'] = pd.to_datetime(candles['begin'], errors='coerce')
-        candles['date'] = candles['begin'].dt.date
-    joined = candles.merge(feats, on=['ticker', 'date'], how='left')
-    for col in ['nn_news_sum', 'nn_news_mean', 'nn_news_max', 'nn_news_count']:
-        if col in joined.columns:
-            joined[col] = joined[col].fillna(0)
 
-    if join_out_path:
-        if join_out_path.endswith('.parquet'):
-            joined.to_parquet(join_out_path, index=False)
-        else:
-            joined.to_csv(join_out_path, index=False)
-
-    if response_format == 'none':
-        return {"status": "ok", "rows_features": len(feats), "rows_joined": len(joined)}
-
-    return {
-        "rows_features": len(feats),
-        "rows_joined": len(joined),
-        "features_preview": feats.head(50).to_dict(orient='records'),
-        "joined_preview": joined.head(50).to_dict(orient='records'),
-    }
-
-# uvicorn app:app --host 0.0.0.0 --port 8000
+# Для запуска напрямую: uvicorn app:app --host 0.0.0.0 --port 8000

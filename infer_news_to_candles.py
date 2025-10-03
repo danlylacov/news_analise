@@ -108,6 +108,37 @@ def aggregate_to_candles(
     return pd.DataFrame(features)
 
 
+def infer_news_to_candles_df(news_df: pd.DataFrame, candles_df: pd.DataFrame, artifacts_dir: str, 
+                            p_threshold: float = 0.5, half_life_days: float = 0.5, max_days: int = 5) -> tuple:
+    """Основная функция для инференса новостей с DataFrame входом"""
+    ticker_to_idx, vocab, ckpt = load_artifacts(artifacts_dir)
+    
+    scores = score_news(news_df, vocab, ckpt['state_dict'], num_labels=len(ticker_to_idx), 
+                       max_len=ckpt['config'].get('max_len', 256))
+    
+    features_df = aggregate_to_candles(
+        candles_df, news_df, scores, ticker_to_idx,
+        half_life_days=half_life_days,
+        p_threshold=p_threshold,
+        max_days=max_days,
+    )
+    
+    # Объединяем свечи с фичами
+    candles_df_copy = candles_df.copy()
+    candles_df_copy['date'] = pd.to_datetime(candles_df_copy['begin'], errors='coerce').dt.date
+    features_df_copy = features_df.copy()
+    
+    joined_df = candles_df_copy.merge(features_df_copy, on=['ticker', 'date'], how='left')
+    
+    # Заполняем пропуски нулями
+    feature_cols = ['nn_news_sum', 'nn_news_mean', 'nn_news_max', 'nn_news_count']
+    for col in feature_cols:
+        if col in joined_df.columns:
+            joined_df[col] = joined_df[col].fillna(0.0)
+    
+    return features_df, joined_df
+
+
 def main():
     parser = argparse.ArgumentParser(description='Инференс: связь новости→тикеры и агрегация по свечам')
     parser.add_argument('--news', required=True, help='task_1_news.csv')
