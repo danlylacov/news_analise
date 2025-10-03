@@ -1,0 +1,75 @@
+{
+  "status": "success",
+  "rows_features": 150,
+  "rows_joined": 378,
+  "features_preview": [
+    {
+      "ticker": "SBER",
+      "date": "2025-04-16",
+      "nn_news_sum": 0.2345,
+      "nn_news_mean": 0.1567,
+      "nn_news_max": 0.3456,
+      "nn_news_count": 3
+    },
+    {
+      "ticker": "GAZP",
+      "date": "2025-04-16",
+      "nn_news_sum": 0.4567,
+      "nn_news_mean": 0.2289,
+      "nn_news_max": 0.5123,
+      "nn_news_count": 5
+    },
+    {
+      "ticker": "LKOH",
+      "date": "2025-04-16",
+      "nn_news_sum": 0.1234,
+      "nn_news_mean": 0.0987,
+      "nn_news_max": 0.1876,
+      "nn_news_count": 2
+    }
+  ],
+  "joined_preview": [
+    {
+      "begin": "2025-04-16T00:00:00",
+      "ticker": "SBER",
+      "open": 250.5,
+      "high": 255.8,
+      "low": 248.2,
+      "close": 253.1,
+      "volume": 15000000,
+      "date": "2025-04-16",
+      "nn_news_sum": 0.2345,
+      "nn_news_mean": 0.1567,
+      "nn_news_max": 0.3456,
+      "nn_news_count": 3
+    },
+    {
+      "begin": "2025-04-16T00:00:00",
+      "ticker": "GAZP",
+      "open": 180.3,
+      "high": 185.5,
+      "low": 178.8,
+      "close": 183.2,
+      "volume": 23000000,
+      "date": "2025-04-16",
+      "nn_news_sum": 0.4567,
+      "nn_news_mean": 0.2289,
+      "nn_news_max": 0.5123,
+      "nn_news_count": 5
+    },
+    {
+      "begin": "2025-04-17T00:00:00",
+      "ticker": "LKOH",
+      "open": 6500.0,
+      "high": 6650.0,
+      "low": 6450.0,
+      "close": 6620.0,
+      "volume": 980000,
+      "date": "2025-04-17",
+      "nn_news_sum": 0.1234,
+      "nn_news_mean": 0.0987,
+      "nn_news_max": 0.1876,
+      "nn_news_count": 2
+    }
+  ]
+}
