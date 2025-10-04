@@ -66,6 +66,7 @@ class InferRequest(BaseModel):
     p_threshold: float = Field(0.5, description='Порог релевантности новостей')
     half_life_days: float = Field(0.5, description='Период полураспада влияния новостей')
     max_days: float = Field(5.0, description='Максимальный возраст учитываемых новостей')
+    add_sentiment: bool = Field(True, description='Добавлять ли сентимент-анализ в результат')
 
 
 class InferResponse(BaseModel):
@@ -217,16 +218,19 @@ def optimized_aggregate_to_candles(
 @app.post('/infer', response_model=InferResponse)
 async def infer(request: InferRequest):
     """
-    Основной эндпоинт для инференса новостей
+    Основной эндпоинт для инференса новостей с сентимент-анализом
     
     Принимает:
     - news: список новостей (без тикеров)
     - candles: список свечей (OHLCV данные)
     - параметры модели и агрегации
+    - add_sentiment: включить ли сентимент-анализ
     
     Возвращает:
     - features: агрегированные новостные фичи по тикерам и датам
     - joined: свечи с добавленными новостными фичами
+    - sentiment колонки: sentiment_mean, sentiment_sum, sentiment_count, 
+      sentiment_positive_count, sentiment_negative_count, sentiment_neutral_count
     """
     try:
         # Загружаем кэшированные артефакты
@@ -243,29 +247,14 @@ async def infer(request: InferRequest):
         df_news = pd.DataFrame(labeled_news)
         df_candles = pd.DataFrame(candles_dicts)
         
-        # Используем оптимизированную функцию скоринга
-        scores = optimized_score_news(df_news, artifacts_data)
-        
-        # Оптимизированная агрегация
-        features_df = optimized_aggregate_to_candles(
-            df_candles, df_news, scores, artifacts_data['ticker_to_idx'],
-            half_life_days=request.half_life_days,
+        # Используем функцию с сентимент-анализом
+        features_df, joined_df = infer_news_to_candles_df(
+            df_news, df_candles, request.artifacts_dir,
             p_threshold=request.p_threshold,
-            max_days=request.max_days
+            half_life_days=request.half_life_days,
+            max_days=request.max_days,
+            add_sentiment=request.add_sentiment
         )
-        
-        # Объединяем свечи с фичами
-        candles_df_copy = df_candles.copy()
-        candles_df_copy['date'] = pd.to_datetime(candles_df_copy['begin'], errors='coerce').dt.date
-        features_df_copy = features_df.copy()
-        
-        joined_df = candles_df_copy.merge(features_df_copy, on=['ticker', 'date'], how='left')
-        
-        # Заполняем пропуски нулями
-        feature_cols = ['nn_news_sum', 'nn_news_mean', 'nn_news_max', 'nn_news_count']
-        for col in feature_cols:
-            if col in joined_df.columns:
-                joined_df[col] = joined_df[col].fillna(0.0)
         
         return InferResponse(
             status="success",
@@ -286,7 +275,21 @@ async def infer(request: InferRequest):
 
 @app.get('/')
 async def root():
-    return {"message": "FORECAST API готов к работе", "version": "1.0"}
+    return {
+        "message": "FORECAST API готов к работе", 
+        "version": "2.0",
+        "features": [
+            "Анализ новостей с нейронной сетью",
+            "Автоматическая разметка тикеров",
+            "Агрегация новостных фич по свечам",
+            "Сентимент-анализ новостей (0=негативный, 1=нейтральный, 2=позитивный)",
+            "Временное затухание влияния новостей"
+        ],
+        "endpoints": [
+            "/infer - основной эндпоинт для анализа",
+            "/health - проверка состояния API"
+        ]
+    }
 
 
 @app.post('/health')

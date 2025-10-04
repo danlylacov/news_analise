@@ -9,6 +9,7 @@ import torch
 
 from src.ml.nn_model import NewsTickerModel
 from src.ml.nn_data import load_vocab, encode_text
+from src.core.sentiment_analysis import add_sentiment_to_news
 
 
 def load_artifacts(artifacts: str):
@@ -23,7 +24,24 @@ def sigmoid(x):
     return 1 / (1 + np.exp(-x))
 
 
-def score_news(df_news: pd.DataFrame, vocab, model_state, num_labels: int, max_len: int = 256, batch_size: int = 256) -> np.ndarray:
+def score_news(df_news: pd.DataFrame, vocab, model_state, num_labels: int, max_len: int = 256, batch_size: int = 256, add_sentiment: bool = True) -> tuple:
+    """
+    Оценка новостей с помощью нейронной сети и сентимент-анализа
+    
+    Args:
+        df_news: Датафрейм с новостями
+        vocab: Словарь для токенизации
+        model_state: Состояние модели
+        num_labels: Количество меток
+        max_len: Максимальная длина последовательности
+        batch_size: Размер батча
+        add_sentiment: Добавлять ли сентимент-анализ
+        
+    Returns:
+        Кортеж (scores, sentiment_features) где:
+        - scores: массив оценок релевантности новостей к тикерам
+        - sentiment_features: датафрейм с сентимент-фичами (если add_sentiment=True)
+    """
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = NewsTickerModel(vocab_size=len(vocab), num_labels=num_labels)
     model.load_state_dict(model_state)
@@ -47,7 +65,19 @@ def score_news(df_news: pd.DataFrame, vocab, model_state, num_labels: int, max_l
             attention_mask = attention_mask.to(device)
             logits = model(input_ids, attention_mask).cpu().numpy()
             scores.append(sigmoid(logits))
-    return np.vstack(scores) if scores else np.zeros((0, num_labels))
+    
+    scores_array = np.vstack(scores) if scores else np.zeros((0, num_labels))
+    
+    # Добавляем сентимент-анализ если требуется
+    sentiment_features = None
+    if add_sentiment:
+        try:
+            sentiment_features = add_sentiment_to_news(df_news)
+        except Exception as e:
+            print(f"Предупреждение: не удалось выполнить сентимент-анализ: {e}")
+            sentiment_features = None
+    
+    return scores_array, sentiment_features
 
 
 def aggregate_to_candles(
@@ -55,6 +85,7 @@ def aggregate_to_candles(
     df_news: pd.DataFrame,
     scores: np.ndarray,
     ticker_to_idx: dict,
+    sentiment_features: pd.DataFrame = None,
     half_life_days: float = 2.0,
     p_threshold: float = 0.5,
     max_days: float = 20.0,
@@ -88,12 +119,32 @@ def aggregate_to_candles(
             else:
                 base_mask = (news_dates <= dt64)
             if not base_mask.any():
-                features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': 0.0, 'nn_news_mean': 0.0, 'nn_news_max': 0.0, 'nn_news_count': 0})
+                feature_row = {'ticker': ticker, 'date': dt, 'nn_news_sum': 0.0, 'nn_news_mean': 0.0, 'nn_news_max': 0.0, 'nn_news_count': 0}
+                if sentiment_features is not None:
+                    feature_row.update({
+                        'sentiment_mean': 1.0,
+                        'sentiment_sum': 0.0,
+                        'sentiment_count': 0,
+                        'sentiment_positive_count': 0,
+                        'sentiment_negative_count': 0,
+                        'sentiment_neutral_count': 0
+                    })
+                features.append(feature_row)
                 continue
             # релевантность по порогу
             mask_thr = base_mask & (probs >= p_threshold)
             if not mask_thr.any():
-                features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': 0.0, 'nn_news_mean': 0.0, 'nn_news_max': 0.0, 'nn_news_count': 0})
+                feature_row = {'ticker': ticker, 'date': dt, 'nn_news_sum': 0.0, 'nn_news_mean': 0.0, 'nn_news_max': 0.0, 'nn_news_count': 0}
+                if sentiment_features is not None:
+                    feature_row.update({
+                        'sentiment_mean': 1.0,
+                        'sentiment_sum': 0.0,
+                        'sentiment_count': 0,
+                        'sentiment_positive_count': 0,
+                        'sentiment_negative_count': 0,
+                        'sentiment_neutral_count': 0
+                    })
+                features.append(feature_row)
                 continue
             # затухание
             deltas = (dt64 - news_dates[mask_thr]).astype('timedelta64[D]').astype(int)
@@ -104,20 +155,54 @@ def aggregate_to_candles(
             ssum = float(np.sum(wvals))
             smean = float(np.mean(wvals)) if cnt > 0 else 0.0
             smax = float(np.max(wvals)) if cnt > 0 else 0.0
-            features.append({'ticker': ticker, 'date': dt, 'nn_news_sum': ssum, 'nn_news_mean': smean, 'nn_news_max': smax, 'nn_news_count': cnt})
+            
+            feature_row = {'ticker': ticker, 'date': dt, 'nn_news_sum': ssum, 'nn_news_mean': smean, 'nn_news_max': smax, 'nn_news_count': cnt}
+            
+            # Добавляем сентимент-фичи если доступны
+            if sentiment_features is not None:
+                # Получаем сентимент для релевантных новостей
+                relevant_news_indices = np.where(mask_thr)[0]
+                if len(relevant_news_indices) > 0:
+                    sentiment_subset = sentiment_features.iloc[relevant_news_indices]
+                    weighted_sentiment = sentiment_subset['sentiment_score'] * weights
+                    
+                    positive_count = (sentiment_subset['sentiment_label'] == 2).sum()
+                    negative_count = (sentiment_subset['sentiment_label'] == 0).sum()
+                    neutral_count = (sentiment_subset['sentiment_label'] == 1).sum()
+                    
+                    feature_row.update({
+                        'sentiment_mean': float(np.mean(weighted_sentiment)),
+                        'sentiment_sum': float(np.sum(weighted_sentiment)),
+                        'sentiment_count': len(sentiment_subset),
+                        'sentiment_positive_count': positive_count,
+                        'sentiment_negative_count': negative_count,
+                        'sentiment_neutral_count': neutral_count
+                    })
+                else:
+                    feature_row.update({
+                        'sentiment_mean': 1.0,
+                        'sentiment_sum': 0.0,
+                        'sentiment_count': 0,
+                        'sentiment_positive_count': 0,
+                        'sentiment_negative_count': 0,
+                        'sentiment_neutral_count': 0
+                    })
+            
+            features.append(feature_row)
     return pd.DataFrame(features)
 
 
 def infer_news_to_candles_df(news_df: pd.DataFrame, candles_df: pd.DataFrame, artifacts_dir: str, 
-                            p_threshold: float = 0.5, half_life_days: float = 0.5, max_days: int = 5) -> tuple:
+                            p_threshold: float = 0.5, half_life_days: float = 0.5, max_days: int = 5, add_sentiment: bool = True) -> tuple:
     """Основная функция для инференса новостей с DataFrame входом"""
     ticker_to_idx, vocab, ckpt = load_artifacts(artifacts_dir)
     
-    scores = score_news(news_df, vocab, ckpt['state_dict'], num_labels=len(ticker_to_idx), 
-                       max_len=ckpt['config'].get('max_len', 256))
+    scores, sentiment_features = score_news(news_df, vocab, ckpt['state_dict'], num_labels=len(ticker_to_idx), 
+                       max_len=ckpt['config'].get('max_len', 256), add_sentiment=add_sentiment)
     
     features_df = aggregate_to_candles(
         candles_df, news_df, scores, ticker_to_idx,
+        sentiment_features=sentiment_features,
         half_life_days=half_life_days,
         p_threshold=p_threshold,
         max_days=max_days,
@@ -132,6 +217,10 @@ def infer_news_to_candles_df(news_df: pd.DataFrame, candles_df: pd.DataFrame, ar
     
     # Заполняем пропуски нулями
     feature_cols = ['nn_news_sum', 'nn_news_mean', 'nn_news_max', 'nn_news_count']
+    if add_sentiment and sentiment_features is not None:
+        feature_cols.extend(['sentiment_mean', 'sentiment_sum', 'sentiment_count', 
+                            'sentiment_positive_count', 'sentiment_negative_count', 'sentiment_neutral_count'])
+    
     for col in feature_cols:
         if col in joined_df.columns:
             joined_df[col] = joined_df[col].fillna(0.0)
