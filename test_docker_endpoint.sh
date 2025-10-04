@@ -24,7 +24,7 @@ sleep 10
 
 # Проверим статус API
 echo "🔍 Проверка статуса API..."
-API_STATUS=$(docker compose exec -T forecast-api curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/health)
+API_STATUS=$(docker compose exec -T forecast-api curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:8000/health)
 if [ "$API_STATUS" = "200" ]; then
     echo "✅ API сервер запущен и работает!"
 else
