@@ -1,0 +1,2 @@
+source_file,export_timestamp,api_status,rows_features,rows_joined,has_features,has_joined,features_columns,joined_columns,sentiment_columns,has_sentiment,avg_sentiment
+api_response_20251004_205609.json,2025-10-04 21:30:00,success,358,378,True,True,12,18,6,True,0.11127930843150707

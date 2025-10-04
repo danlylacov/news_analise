@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, UploadFile, File, Form, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, List, Dict, Any
 import pandas as pd
@@ -6,6 +6,12 @@ import torch
 import os
 import numpy as np
 from functools import lru_cache
+import asyncio
+import aiohttp
+import json
+import logging
+import io
+from datetime import datetime
 
 from src.core.auto_label_tickers import build_aliases, assign_tickers_row
 from src.core.infer_news_to_candles import infer_news_to_candles_df
@@ -76,6 +82,85 @@ class InferResponse(BaseModel):
     features_preview: Optional[List[Dict[str, Any]]] = None
     joined_preview: Optional[List[Dict[str, Any]]] = None
     message: Optional[str] = None
+
+
+class CallbackPayload(BaseModel):
+    sessionId: str
+    status: str
+    data: Optional[str] = None
+    errorMessage: Optional[str] = None
+
+
+class FileProcessResponse(BaseModel):
+    message: str
+    sessionId: str
+    status: str
+
+
+async def send_callback(callback_url: str, payload: CallbackPayload):
+    """Отправка результата обработки на callback URL"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                callback_url,
+                json=payload.dict(),
+                headers={'Content-Type': 'application/json'},
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status == 200:
+                    logging.info(f"Callback sent successfully to {callback_url} for session {payload.sessionId}")
+                    return True
+                else:
+                    logging.error(f"Callback failed with status {response.status} for session {payload.sessionId}")
+                    return False
+    except Exception as e:
+        logging.error(f"Error sending callback to {callback_url} for session {payload.sessionId}: {str(e)}")
+        return False
+
+
+def parse_news_file(file_content: bytes) -> List[Dict]:
+    """Парсинг файла с новостями (CSV формат)"""
+    try:
+        # Пробуем разные кодировки
+        encodings = ['utf-8', 'cp1251', 'latin-1']
+        df = None
+        
+        for encoding in encodings:
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(file_content),
+                    encoding=encoding,
+                    parse_dates=['publish_date'],
+                    date_parser=pd.to_datetime
+                )
+                break
+            except (UnicodeDecodeError, pd.errors.ParserError):
+                continue
+        
+        if df is None:
+            raise ValueError("Не удалось прочитать файл с новостями")
+        
+        # Проверяем наличие необходимых колонок
+        required_columns = ['publish_date', 'title', 'publication']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        
+        if missing_columns:
+            raise ValueError(f"Отсутствуют необходимые колонки: {missing_columns}")
+        
+        # Конвертируем в список словарей
+        news_data = df[required_columns].to_dict(orient='records')
+        
+        # Преобразуем даты в строки
+        for item in news_data:
+            if pd.notna(item['publish_date']):
+                item['publish_date'] = item['publish_date'].strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                item['publish_date'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        return news_data
+        
+    except Exception as e:
+        raise ValueError(f"Ошибка при парсинге файла: {str(e)}")
 
 
 def auto_label_news(news_dicts: List[Dict]) -> List[Dict]:
@@ -215,6 +300,145 @@ def optimized_aggregate_to_candles(
     return pd.DataFrame(features)
 
 
+@app.post('/process-news-file', response_model=FileProcessResponse)
+async def process_news_file(
+    file: UploadFile = File(..., description="CSV файл с новостями"),
+    callbackUrl: str = Form(..., description="URL для отправки результата"),
+    sessionId: str = Form(..., description="Идентификатор сессии"),
+    artifacts_dir: str = Form("artifacts", description="Путь к артефактам модели"),
+    p_threshold: float = Form(0.5, description="Порог релевантности новостей"),
+    half_life_days: float = Form(0.5, description="Период полураспада влияния новостей"),
+    max_days: float = Form(5.0, description="Максимальный возраст учитываемых новостей"),
+    add_sentiment: bool = Form(True, description="Добавлять ли сентимент-анализ в результат")
+):
+    """
+    Эндпоинт для обработки файла с новостями и отправки результата на callback URL
+    
+    Принимает:
+    - file: CSV файл с новостями (колонки: publish_date, title, publication)
+    - callbackUrl: URL для отправки результата
+    - sessionId: идентификатор сессии для отслеживания
+    - параметры обработки
+    
+    Возвращает:
+    - статус принятия файла
+    - sessionId для отслеживания
+    """
+    try:
+        # Читаем содержимое файла
+        file_content = await file.read()
+        
+        if not file_content:
+            raise HTTPException(status_code=400, detail="Файл пустой")
+        
+        # Парсим файл с новостями
+        news_data = parse_news_file(file_content)
+        
+        if not news_data:
+            raise HTTPException(status_code=400, detail="Не удалось извлечь данные из файла")
+        
+        # Запускаем обработку в фоновом режиме
+        asyncio.create_task(
+            process_news_background(
+                news_data, callbackUrl, sessionId, artifacts_dir,
+                p_threshold, half_life_days, max_days, add_sentiment
+            )
+        )
+        
+        return FileProcessResponse(
+            message="Файл принят к обработке",
+            sessionId=sessionId,
+            status="accepted"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Отправляем ошибку на callback
+        error_payload = CallbackPayload(
+            sessionId=sessionId,
+            status="error",
+            errorMessage=f"Ошибка при обработке файла: {str(e)}"
+        )
+        asyncio.create_task(send_callback(callbackUrl, error_payload))
+        
+        raise HTTPException(status_code=500, detail=f"Ошибка при обработке файла: {str(e)}")
+
+
+async def process_news_background(
+    news_data: List[Dict],
+    callback_url: str,
+    session_id: str,
+    artifacts_dir: str,
+    p_threshold: float,
+    half_life_days: float,
+    max_days: float,
+    add_sentiment: bool
+):
+    """Фоновая обработка новостей и отправка результата на callback"""
+    try:
+        # Загружаем кэшированные артефакты
+        artifacts_data = load_cached_artifacts(artifacts_dir)
+        
+        # Автоматическая разметка тикеров для новостей
+        labeled_news = auto_label_news(news_data)
+        
+        # Конвертируем в DataFrame
+        df_news = pd.DataFrame(labeled_news)
+        
+        # Создаем пустой DataFrame свечей для демонстрации
+        # В реальном сценарии свечи должны быть предоставлены отдельно
+        df_candles = pd.DataFrame({
+            'begin': pd.date_range(start='2025-01-01', periods=1, freq='D'),
+            'ticker': ['SBER'],
+            'open': [100.0],
+            'high': [105.0],
+            'low': [95.0],
+            'close': [102.0],
+            'volume': [1000000]
+        })
+        
+        # Используем функцию с сентимент-анализом
+        features_df, joined_df = infer_news_to_candles_df(
+            df_news, df_candles, artifacts_dir,
+            p_threshold=p_threshold,
+            half_life_days=half_life_days,
+            max_days=max_days,
+            add_sentiment=add_sentiment
+        )
+        
+        # Подготавливаем результат
+        result_data = {
+            "features": features_df.to_dict(orient='records'),
+            "joined": joined_df.to_dict(orient='records'),
+            "summary": {
+                "rows_features": len(features_df),
+                "rows_joined": len(joined_df),
+                "news_count": len(df_news),
+                "candles_count": len(df_candles)
+            }
+        }
+        
+        # Отправляем успешный результат
+        success_payload = CallbackPayload(
+            sessionId=session_id,
+            status="success",
+            data=json.dumps(result_data, ensure_ascii=False, default=str)
+        )
+        
+        await send_callback(callback_url, success_payload)
+        
+    except Exception as e:
+        # Отправляем ошибку
+        error_payload = CallbackPayload(
+            sessionId=session_id,
+            status="error",
+            errorMessage=f"Ошибка при обработке новостей: {str(e)}"
+        )
+        
+        await send_callback(callback_url, error_payload)
+
+
 @app.post('/infer', response_model=InferResponse)
 async def infer(request: InferRequest):
     """
@@ -287,6 +511,7 @@ async def root():
         ],
         "endpoints": [
             "/infer - основной эндпоинт для анализа",
+            "/process-news-file - обработка файлов с новостями и callback",
             "/health - проверка состояния API"
         ]
     }

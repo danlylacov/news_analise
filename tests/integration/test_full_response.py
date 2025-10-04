@@ -40,7 +40,7 @@ def test_full_json_response():
     
     # Попробуем разные URL
     urls_to_test = [
-        "http://127.0.0.1:8000/infer"
+        "http://188.225.74.138:8000/infer"
     ]
     
     for url in urls_to_test:
