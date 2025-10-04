@@ -13,7 +13,7 @@ def test_full_json_response():
     print("=== ТЕСТ ПОЛНОГО JSON ФАЙЛА ===")
     
     # Читаем полный JSON файл
-    with open('full_swagger_data.json', 'r', encoding='utf-8') as f:
+    with open('examples/json_samples/full_swagger_data.json', 'r', encoding='utf-8') as f:
         full_data = json.load(f)
     
     print(f"📊 Входные данные:")
@@ -40,7 +40,7 @@ def test_full_json_response():
     
     # Попробуем разные URL
     urls_to_test = [
-        "http://176.57.217.27:8000/infer"
+        "http://127.0.0.1:8000/infer"
     ]
     
     for url in urls_to_test:
@@ -221,7 +221,7 @@ def show_json_structure():
     """Показываем структуру JSON файла"""
     print("=== СТРУКТУРА JSON ФАЙЛА ===")
     
-    with open('full_swagger_data.json', 'r', encoding='utf-8') as f:
+    with open('examples/json_samples/full_swagger_data.json', 'r', encoding='utf-8') as f:
         data = json.load(f)
     
     print("📋 Структура:")
