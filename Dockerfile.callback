@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1
+FROM python:3.10-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Install Flask
+RUN pip install --upgrade pip && pip install flask
+
+# Copy callback server
+COPY mock_callback_server.py .
+
+EXPOSE 8081
+
+CMD ["python", "mock_callback_server.py"]

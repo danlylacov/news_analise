@@ -19,3 +19,23 @@ services:
       timeout: 10s
       retries: 3
       start_period: 40s
+    networks:
+      - forecast-network
+
+  callback-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.callback
+    container_name: callback-server
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    networks:
+      - forecast-network
+
+networks:
+  forecast-network:
+    driver: bridge
